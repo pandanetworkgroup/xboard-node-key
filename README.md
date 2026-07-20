@@ -130,3 +130,37 @@ echo admin_setting("server_ws_url");
 - 协议：HY2 / VLESS / VMess / TUIC / anytls / WireGuard 等均支持证书指纹上报
 - xhttp 传输：仅 xray 内核支持，若节点用 xhttp，请 `--kernel xray`
 - 架构：仅 amd64（x86_64），其他架构暂未编译
+
+
+---
+
+## HY2 DNAT Watchdog（端口跳变转发）
+
+本仓库 `hy2-dnat-watchdog/` 目录提供 HY2 端口跳变 DNAT 转发 watchdog 脚本：自动监控 xboard-node 的 Hysteria2 端口变化，动态生成 DNAT 规则，把 N..N+OFFSET 范围的 UDP 流量转发到实际监听端口 N（OFFSET 默认 10000，可调）。
+
+| 文件 | 说明 |
+| --- | --- |
+| [`hy2-dnat-watchdog/install.sh`](hy2-dnat-watchdog/install.sh) | 一键部署脚本 |
+| [`hy2-dnat-watchdog/uninstall.sh`](hy2-dnat-watchdog/uninstall.sh) | 卸载脚本 |
+| [`hy2-dnat-watchdog/GUIDE.zh-CN.md`](hy2-dnat-watchdog/GUIDE.zh-CN.md) | 完整中文教程 |
+
+一键部署（默认 offset=10000）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-node-key/main/hy2-dnat-watchdog/install.sh | sudo bash
+```
+
+自定义偏移量部署（HY2 端口 N → 转发 N..N+K 到 N）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-node-key/main/hy2-dnat-watchdog/install.sh | sudo bash -s -- --offset 20000
+```
+
+部署后运行时调整偏移量（无需重装，立即生效）：
+
+```bash
+/usr/local/bin/hy2-dnat-watchdog.sh --offset 20000
+/usr/local/bin/hy2-dnat-watchdog.sh --show
+```
+
+详细原理、双后端自动选择（nftables/iptables）、与宝塔/docker 等工具共存、故障排查等见 [`hy2-dnat-watchdog/GUIDE.zh-CN.md`](hy2-dnat-watchdog/GUIDE.zh-CN.md)。
