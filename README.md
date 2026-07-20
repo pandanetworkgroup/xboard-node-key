@@ -13,12 +13,14 @@ xboard-node **带证书指纹上报补丁版**的一键安装脚本。在官方 
 
 ## 一行命令安装（推荐）
 
+> 把下面 `--panel` / `--token` / `--machine-id` 三个值换成你自己面板的对应值。
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-node-key/main/install.sh \
   | sudo bash -s -- --mode machine \
-                      --panel 'https://node.178278.xyz' \
-                      --token '你的_machine_token' \
-                      --machine-id 9
+                      --panel 'https://your-panel-domain.com' \
+                      --token '面板导出的_machine_token' \
+                      --machine-id 1
 ```
 
 参数对应面板「节点管理 → 查看配置」中的导出值：
