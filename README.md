@@ -1,74 +1,85 @@
 # xboard-node-key
 
-xboard-node **甯﹁瘉涔︽寚绾逛笂鎶ヨˉ涓佺増**鐨勪竴閿畨瑁呰剼鏈€傚湪瀹樻柟 xboard-node 鍩虹涓婃柊澧炰袱澶勬敼鍔細
+xboard-node **带证书指纹上报补丁版**的一键安装脚本。在官方 xboard-node 基础上新增两处改动：
 
-| 鏂囦欢 | 鏀瑰姩 |
+| 文件 | 改动 |
 | --- | --- |
-| `internal/cert/cert.go` | 鏂板 SPKI SHA-256 鎸囩汗璁＄畻锛沜ertMaterial 鏂板 spkiSha256 瀛楁锛涙柊澧?`SPKIFingerprint()` 杩斿洖 Base64 鎸囩汗锛宍CertPEM()` 杩斿洖瀹屾暣 PEM |
-| `internal/service/service.go` | `buildMetrics()` 娉ㄥ叆 `cert_fingerprint` 鍜?`cert_pem`锛岄殢姣忓垎閽?metrics 涓婃姤闈㈡澘 |
+| `internal/cert/cert.go` | 新增 SPKI SHA-256 指纹计算；certMaterial 新增 spkiSha256 字段；新增 `SPKIFingerprint()` 返回 Base64 指纹，`CertPEM()` 返回完整 PEM |
+| `internal/service/service.go` | `buildMetrics()` 注入 `cert_fingerprint` 和 `cert_pem`，随每分钟 metrics 上报面板 |
 
-閮ㄧ讲鍒伴潰鏉垮悗锛宍v2_server` 琛ㄤ細鍐欏叆 `cert_fingerprint`锛坰ing-box 鐢紝44 瀛楃 Base64 SPKI锛夊拰 `cert_pem`锛堝畬鏁?PEM锛孭HP 绔寜瀹㈡埛绔被鍨嬫淳鐢熶笅鍙戯級锛岃闃呯浠庢鍙敤璇佷功鎸囩汗鍥哄畾鏇夸唬 insecure: true銆?
+部署到面板后，`v2_server` 表会写入 `cert_fingerprint`（sing-box 用，44 字符 Base64 SPKI）和 `cert_pem`（完整 PEM，PHP 端按客户端类型派生下发），订阅端从此可用证书指纹固定替代 insecure: true。
+
 ---
 
-## 涓€琛屽懡浠ゅ畨瑁咃紙鎺ㄨ崘锛?
+## 一行命令安装（推荐）
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-node-key/main/install.sh \
   | sudo bash -s -- --mode machine \
                       --panel 'https://node.178278.xyz' \
-                      --token '浣犵殑_machine_token' \
+                      --token '你的_machine_token' \
                       --machine-id 9
 ```
 
-鍙傛暟瀵瑰簲闈㈡澘銆岃妭鐐圭鐞?鈫?鏌ョ湅閰嶇疆銆嶄腑鐨勫鍑哄€硷細
+参数对应面板「节点管理 → 查看配置」中的导出值：
 
-| 鍙傛暟 | 鏉ユ簮 |
+| 参数 | 来源 |
 | --- | --- |
-| `--panel` | 闈㈡澘璁块棶鍩熷悕锛圚TTPS锛?|
-| `--token` | 闈㈡澘銆岃妭鐐圭鐞嗐€嶄腑瀵煎嚭鐨?machine token |
-| `--machine-id` | 闈㈡澘涓殑 machine ID锛堟暟瀛楋級 |
+| `--panel` | 面板访问域名（HTTPS） |
+| `--token` | 面板「节点管理」中导出的 machine token |
+| `--machine-id` | 面板中的 machine ID（数字） |
 
-## 浜や簰寮忓畨瑁?
-鍏堜笅杞借剼鏈紝鍐嶄氦浜掑紡杩愯锛?
+## 交互式安装
+
+先下载脚本，再交互式运行：
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-node-key/main/install.sh -o install.sh
 sudo bash install.sh
 ```
 
-鑴氭湰浼氶€愰」璇㈤棶闈㈡澘鍦板潃銆乼oken銆乵achine id銆?
-## 鍗囩骇鐜版湁閮ㄧ讲
+脚本会逐项询问面板地址、token、machine id。
 
-宸插瓨鍦?`/etc/xboard-node/config.yml` 鏃讹紝鑴氭湰鑷姩杩涘叆銆屽崌绾фā寮忋€嶏紙浠呮浛鎹簩杩涘埗锛屼繚鐣欓厤缃級锛?
+## 升级现有部署
+
+已存在 `/etc/xboard-node/config.yml` 时，脚本自动进入「升级模式」（仅替换二进制，保留配置）：
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-node-key/main/install.sh \
   | sudo bash -s -- --mode machine --panel 'https://...' --token '...' --machine-id 1
 ```
 
-## 瀹屾暣鍙傛暟
+## 完整参数
 
-| 鍙傛暟 | 榛樿 | 璇存槑 |
+| 参数 | 默认 | 说明 |
 | --- | --- | --- |
-| `--mode` | machine | 閰嶇疆妯″紡锛堝綋鍓嶄粎 machine锛?|
-| `--panel` | - | 闈㈡澘璁块棶鍦板潃 |
+| `--mode` | machine | 配置模式（当前仅 machine） |
+| `--panel` | - | 面板访问地址 |
 | `--token` | - | machine token |
-| `--machine-id` | - | 闈㈡澘 machine ID |
-| `--instance-id` | 鑷姩鐢熸垚 | 鑷畾涔?instance_id |
-| `--health-port` | 65530 | 鍋ュ悍妫€鏌ョ鍙?|
+| `--machine-id` | - | 面板 machine ID |
+| `--instance-id` | 自动生成 | 自定义 instance_id |
+| `--health-port` | 65530 | 健康检查端口 |
 | `--kernel` | singbox | singbox / xray |
 | `--log-level` | info | info / warn / error / debug |
-| `--force` | - | 寮哄埗瑕嗙洊宸插瓨鍦ㄧ殑 config.yml |
-| `--skip-download` | - | 涓嶄笅杞戒簩杩涘埗锛屽鐢ㄧ幇鏈?|
+| `--force` | - | 强制覆盖已存在的 config.yml |
+| `--skip-download` | - | 不下载二进制，复用现有 |
 
-## 瀹夎鍚?
-- 浜岃繘鍒讹細`/usr/local/bin/xboard-node`
-- 閰嶇疆锛歚/etc/xboard-node/config.yml`锛?00 鏉冮檺锛?- 鍑瘉锛歚/etc/xboard-node/credentials.env`锛?00 鏉冮檺锛?- 瀹炰緥鏁版嵁锛歚/etc/xboard-node/instances/<instance_id>/node-<id>/certs/`
-- systemd 鏈嶅姟锛歚xboard-node.service`
+## 安装后
 
-楠岃瘉涓婃姤锛?
+- 二进制：`/usr/local/bin/xboard-node`
+- 配置：`/etc/xboard-node/config.yml`（600 权限）
+- 凭证：`/etc/xboard-node/credentials.env`（600 权限）
+- 实例数据：`/etc/xboard-node/instances/<instance_id>/node-<id>/certs/`
+- systemd 服务：`xboard-node.service`
+
+验证上报：
+
 ```bash
-# 1. 鑺傜偣鏃ュ織
+# 1. 节点日志
 journalctl -u xboard-node -f
 
-# 2. 闈㈡澘鏈嶅姟鍣ㄦ煡 DB锛堟浛鎹㈠鍣ㄥ悕锛?docker exec xboard-xboard-1 php /www/artisan tinker --execute='
+# 2. 面板服务器查 DB（替换容器名）
+docker exec xboard-xboard-1 php /www/artisan tinker --execute='
 $rows = \DB::table("v2_server")->select("id","name","cert_fingerprint","cert_pem")->get();
 foreach ($rows as $r) {
     echo sprintf("id=%d name=%s fp_len=%d pem_len=%d\n",
@@ -79,36 +90,41 @@ foreach ($rows as $r) {
 '
 ```
 
-姣忎釜宸查厤缃瘉涔︾殑鑺傜偣搴旀湁 `fp_len=44`銆乣pem_len=570-900`銆?
-## 鍥炴粴
+每个已配置证书的节点应有 `fp_len=44`、`pem_len=570-900`。
+
+## 回滚
 
 ```bash
 sudo systemctl stop xboard-node
-sudo cp /usr/local/bin/xboard-node.bak.鍒楀嚭鐨勬椂闂存埑 /usr/local/bin/xboard-node
+sudo cp /usr/local/bin/xboard-node.bak.列出的时间戳 /usr/local/bin/xboard-node
 sudo systemctl start xboard-node
 ```
 
-## 闈㈡澘渚у墠缃潯浠?
-閮ㄧ讲 node 渚т箣鍓嶏紝闈㈡澘蹇呴』宸诧細
+## 面板侧前置条件
 
-1. `v2_server` 琛ㄥ凡鍔?`cert_fingerprint` 鍜?`cert_pem` 瀛楁
-2. `app/Services/ServerService.php` 宸查儴缃蹭慨鏀圭増锛坲pdateMetrics 鎸佷箙鍖栦袱涓瓧娈碉級
-3. `app/Protocols/*.php` 8 涓崗璁敓鎴愬櫒宸查儴缃蹭慨鏀圭増
-4. 瀹瑰櫒宸查噸鍚竻 OPcache
+部署 node 侧之前，面板必须已：
 
-璇﹁閮ㄧ讲鎵嬪唽銆?
-## 闈㈡澘渚?server_ws_url 閰嶇疆
+1. `v2_server` 表已加 `cert_fingerprint` 和 `cert_pem` 字段
+2. `app/Services/ServerService.php` 已部署修改版（updateMetrics 持久化两个字段）
+3. `app/Protocols/*.php` 8 个协议生成器已部署修改版
+4. 容器已重启清 OPcache
 
-濡傛灉 node 鍚姩鍚庢棩蹇楀嚭鐜?`WARN ws disconnected error=dial: malformed ws or wss URL`锛?
+详见部署手册。
+
+## 面板侧 server_ws_url 配置
+
+如果 node 启动后日志出现 `WARN ws disconnected error=dial: malformed ws or wss URL`：
+
 ```bash
-# 闈㈡澘鏈嶅姟鍣ㄦ墽琛岋紝娉ㄦ剰 scheme 蹇呴』鏄?wss://锛岃矾寰勫繀椤讳互 /ws 缁撳熬
+# 面板服务器执行，注意 scheme 必须是 wss://，路径必须以 /ws 结尾
 docker exec xboard-xboard-1 php /www/artisan tinker --execute='
-admin_setting(["server_ws_url"=>"wss://浣犵殑闈㈡澘鍩熷悕/ws"]);
+admin_setting(["server_ws_url"=>"wss://你的面板域名/ws"]);
 echo admin_setting("server_ws_url");
 '
 ```
 
-## 鍗忚鍏煎鎬?
-- 鍗忚锛欻Y2 / VLESS / VMess / TUIC / anytls / WireGuard 绛夊潎鏀寔璇佷功鎸囩汗涓婃姤
-- xhttp 浼犺緭锛氫粎 xray 鍐呮牳鏀寔锛岃嫢鑺傜偣鐢?xhttp锛岃 `--kernel xray`
-- 鏋舵瀯锛氫粎 amd64锛坸86_64锛夛紝鍏朵粬鏋舵瀯鏆傛湭缂栬瘧
+## 协议兼容性
+
+- 协议：HY2 / VLESS / VMess / TUIC / anytls / WireGuard 等均支持证书指纹上报
+- xhttp 传输：仅 xray 内核支持，若节点用 xhttp，请 `--kernel xray`
+- 架构：仅 amd64（x86_64），其他架构暂未编译
