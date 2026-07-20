@@ -137,7 +137,7 @@ if [ -z "$INSTANCE_ID_OVERRIDE" ]; then
         h=$(printf '%s' "$hash_input" | openssl dgst -sha256 -hex 2>/dev/null | grep -oE '[0-9a-f]{6}' | head -1)
     fi
     [ -n "$h" ] || die "cannot compute instance hash (need sha256sum / shasum / openssl)"
-    INSTANCE_ID="node-${clean_host}-machine-${MACHINE_ID}-${h}"
+    INSTANCE_ID="${clean_host}-machine-${MACHINE_ID}-${h}"
 else
     INSTANCE_ID="$INSTANCE_ID_OVERRIDE"
 fi
@@ -173,9 +173,11 @@ if [ $SKIP_DOWNLOAD -eq 0 ]; then
     curl -fL -o "$tmp_dl" "$ASSET_URL"
     chmod +x "$tmp_dl"
 
-    if ! file "$tmp_dl" 2>/dev/null | grep -q 'ELF'; then
+    # Validate ELF magic (\\x7fELF) without depending on `file` command
+    elf_magic=$(head -c 4 "$tmp_dl" | od -An -tx1 2>/dev/null | tr -d ' \n')
+    if [ "$elf_magic" != "7f454c46" ]; then
         rm -f "$tmp_dl"
-        die "downloaded file is not an ELF binary"
+        die "downloaded file is not an ELF binary (magic=$elf_magic)"
     fi
 
     if [ -f "$BIN_PATH" ]; then
