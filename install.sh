@@ -19,12 +19,11 @@ REPO="pandanetworkgroup/xboard-node-key"
 INSTALL_DIR="/etc/xboard-node"
 BIN_PATH="/usr/local/bin/xboard-node"
 SERVICE_FILE="/etc/systemd/system/xboard-node.service"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 
 DEF_HEALTH_PORT=65530
 DEF_KERNEL="singbox"
 DEF_LOG_LEVEL="info"
-DEF_WATCHDOG_OFFSET=10000
 
 # ==================== Logging ====================
 if [ -t 2 ]; then
@@ -45,10 +44,9 @@ INSTANCE_ID_OVERRIDE=""
 HEALTH_PORT=""
 KERNEL=""
 LOG_LEVEL=""
+UPGRADE_MODE=0
 FORCE=0
 SKIP_DOWNLOAD=0
-WATCHDOG_OFFSET=""
-NO_HY2_WATCHDOG=0
 
 usage() {
     cat <<'USAGE_EOF'
@@ -58,6 +56,9 @@ One-line install:
   curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-node-key/main/install.sh \
     | sudo bash -s -- --mode machine --panel 'https://node.example.com' \
                          --token 'xxx' --machine-id 1
+
+Upgrade (rollback binary, then download latest):
+  sudo bash install.sh --upgrade
 
 Interactive install:
   sudo bash install.sh
@@ -72,10 +73,9 @@ Args:
   --health-port PORT      health check port (default 65530)
   --kernel TYPE           singbox or xray (default singbox)
   --log-level LEVEL       info / warn / error / debug (default info)
+  --upgrade               rollback binary from .bak, then download latest
   --force                 force overwrite existing config.yml
   --skip-download         skip binary download, reuse /usr/local/bin/xboard-node
-  --offset K              HY2 DNAT watchdog port-range offset (default 10000)
-  --no-hy2-watchdog       skip integrated HY2 DNAT watchdog deployment
   -h, --help              show this help
 USAGE_EOF
 }
@@ -90,10 +90,9 @@ while [ $# -gt 0 ]; do
         --health-port)   HEALTH_PORT="$2"; shift 2 ;;
         --kernel)        KERNEL="$2"; shift 2 ;;
         --log-level)     LOG_LEVEL="$2"; shift 2 ;;
+        --upgrade)       UPGRADE_MODE=1; shift ;;
         --force)         FORCE=1; shift ;;
         --skip-download) SKIP_DOWNLOAD=1; shift ;;
-        --offset)        WATCHDOG_OFFSET="$2"; shift 2 ;;
-        --no-hy2-watchdog) NO_HY2_WATCHDOG=1; shift ;;
         -h|--help)       usage; exit 0 ;;
         --)              shift; break ;;
         *)               die "unknown arg: $1 (use --help for usage)" ;;
@@ -110,6 +109,112 @@ NEED_INTERACTIVE=0
 [ -z "$TOKEN" ]       && NEED_INTERACTIVE=1
 [ -z "$MACHINE_ID" ]  && NEED_INTERACTIVE=1
 
+# ==================== Upgrade mode ====================
+OFFICIAL_REPO="cedar2025/xboard-node"
+
+if [ ${UPGRADE_MODE:-0} -eq 1 ]; then
+    log "upgrade mode: restore official binary, then install latest patched binary"
+    hr
+
+    if [ ! -f "$BIN_PATH" ]; then
+        die "no xboard-node binary found at $BIN_PATH. cannot upgrade."
+    fi
+
+    # Step 1: download original binary from official xboard-node repo
+    log "Step 1/2: restoring official binary from $OFFICIAL_REPO"
+    log "querying latest official release..."
+    OFF_REL_JSON=$(curl -fsSL "https://api.github.com/repos/${OFFICIAL_REPO}/releases/latest" 2>/dev/null || true)
+    OFF_ASSET_URL=$(echo "$OFF_REL_JSON" | grep -oE '"browser_download_url":[[:space:]]*"[^"]+"' \
+                    | grep -E 'linux-amd64' | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+    if [ -z "$OFF_ASSET_URL" ]; then
+        warn "no linux-amd64 asset found in $OFFICIAL_REPO releases -> fallback to .bak.* backup"
+        LATEST_BAK=$(ls -t "$BIN_PATH".bak.* 2>/dev/null | head -1)
+        if [ -n "$LATEST_BAK" ]; then
+            log "restoring from $LATEST_BAK"
+            cp -a "$LATEST_BAK" "$BIN_PATH"
+            chmod +x "$BIN_PATH"
+        else
+            die "no official release asset and no .bak.* backup. cannot restore original binary."
+        fi
+    else
+        log "downloading official binary: $OFF_ASSET_URL"
+        tmp_off=$(mktemp)
+        curl -fL -o "$tmp_off" "$OFF_ASSET_URL"
+        chmod +x "$tmp_off"
+
+        elf_magic=$(head -c 4 "$tmp_off" | od -An -tx1 2>/dev/null | tr -d ' \n')
+        if [ "$elf_magic" != "7f454c46" ]; then
+            rm -f "$tmp_off"
+            die "official binary is not an ELF binary (magic=$elf_magic)"
+        fi
+
+        TS=$(date +%Y%m%d%H%M%S)
+        if [ -f "$BIN_PATH" ]; then
+            log "backup current binary -> $BIN_PATH.bak.$TS"
+            cp -a "$BIN_PATH" "$BIN_PATH.bak.$TS"
+        fi
+
+        mv -f "$tmp_off" "$BIN_PATH"
+        chmod +x "$BIN_PATH"
+        log "official binary restored: $(wc -c < "$BIN_PATH") bytes"
+    fi
+
+    # Restart with official binary to ensure clean state
+    log "restarting with official binary"
+    systemctl restart xboard-node
+    sleep 3
+    if systemctl is-active --quiet xboard-node; then
+        log "official binary running OK"
+    else
+        warn "official binary not active (may lack cert-patch features), continuing with patched upgrade..."
+    fi
+
+    hr
+    # Step 2: download latest patched binary from xboard-node-key
+    log "Step 2/2: downloading latest patched binary from $REPO"
+    log "querying latest patched release..."
+    REL_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
+    ASSET_URL=$(echo "$REL_JSON" | grep -oE '"browser_download_url":[[:space:]]*"[^"]+"' \
+                | grep -E 'linux-amd64' | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+    [ -n "$ASSET_URL" ] || die "no linux-amd64 asset found in releases of $REPO."
+
+    log "downloading: $ASSET_URL"
+    tmp_dl=$(mktemp)
+    curl -fL -o "$tmp_dl" "$ASSET_URL"
+    chmod +x "$tmp_dl"
+
+    elf_magic=$(head -c 4 "$tmp_dl" | od -An -tx1 2>/dev/null | tr -d ' \n')
+    if [ "$elf_magic" != "7f454c46" ]; then
+        rm -f "$tmp_dl"
+        die "downloaded file is not an ELF binary (magic=$elf_magic)"
+    fi
+
+    mv -f "$tmp_dl" "$BIN_PATH"
+    chmod +x "$BIN_PATH"
+    log "patched binary installed: $(wc -c < "$BIN_PATH") bytes"
+
+    # Step 3: restart service
+    log "restarting xboard-node service"
+    systemctl restart xboard-node
+    sleep 3
+
+    if systemctl is-active --quiet xboard-node; then
+        log "service is active"
+    else
+        warn "service not active, recent logs:"
+        journalctl -u xboard-node -n 30 --no-pager || true
+        die "upgrade failed: service not active"
+    fi
+
+    echo
+    log "============ upgrade done ============"
+    log "binary: $BIN_PATH ($(wc -c < "$BIN_PATH") bytes)"
+    log "config: $INSTALL_DIR/config.yml (unchanged)"
+    log "logs:   journalctl -u xboard-node -f"
+    log "verify: wait 60-90s, then check v2_server.cert_fingerprint / cert_pem in panel DB"
+    exit 0
+fi
+
 if [ $NEED_INTERACTIVE -eq 1 ]; then
     if [ ! -t 0 ]; then
         die "interactive mode requires a TTY. when piping via curl|bash, all required args must be supplied. to use interactive mode, download the script first: curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh -o install.sh && sudo bash install.sh"
@@ -124,7 +229,6 @@ fi
 [ -z "$HEALTH_PORT" ] && HEALTH_PORT=$DEF_HEALTH_PORT
 [ -z "$KERNEL" ]      && KERNEL=$DEF_KERNEL
 [ -z "$LOG_LEVEL" ]   && LOG_LEVEL=$DEF_LOG_LEVEL
-[ -z "$WATCHDOG_OFFSET" ] && WATCHDOG_OFFSET=$DEF_WATCHDOG_OFFSET
 
 # ==================== Basic validation ====================
 [ "$MODE" = "machine" ] || die "only --mode machine is supported"
@@ -295,795 +399,6 @@ else
     warn "service not active, recent logs:"
     journalctl -u xboard-node -n 30 --no-pager || true
     die "deployment failed"
-fi
-
-# ==================== HY2 DNAT Watchdog (integrated, lazy) ====================
-# Default: deploy watchdog alongside node. Watchdog is lazy - only creates DNAT
-# rules when a Hysteria2 port is detected; otherwise cron runs are no-ops, so it
-# is safe on nodes without HY2. Use --no-hy2-watchdog to skip.
-if [ "$NO_HY2_WATCHDOG" -eq 0 ]; then
-    log "deploying HY2 DNAT Watchdog (offset=$WATCHDOG_OFFSET, lazy mode)..."
-    cat > /tmp/.xboard-hy2-wd-installer.$$ << 'EMBEDDED_WD_INSTALLER'
-#!/bin/bash
-# ============================================================
-# HY2 DNAT Watchdog 一键部署脚本
-# 功能：自动监控 xboard-node 的 Hysteria2 端口变化，
-#       动态生成 DNAT 规则（端口 N → 转发 N ~ N+OFFSET 到 N）
-# 支持：iptables / nftables 自动检测，IPv4+IPv6 双栈
-# 兼容：Ubuntu / Debian / CentOS / AlmaLinux / Alpine / Arch
-#
-# 命令行参数（可选）：
-#   --offset K    首次部署时自定义偏移量（默认 10000）
-#                 HY2 端口 N → 转发 N ~ N+K 到 N
-#   --help, -h    显示帮助
-# 运行时改 offset 请直接调 watchdog 脚本：
-#   /usr/local/bin/hy2-dnat-watchdog.sh --offset 20000
-#   /usr/local/bin/hy2-dnat-watchdog.sh --show
-# ============================================================
-
-set -e
-
-# ---- 配置区（按需修改）----
-OFFSET=10000  # 默认偏移量，HY2 端口 N → 转发 N ~ N+OFFSET 到 N（上限 65535 自动截断）
-# ===========================
-
-# ---- 解析命令行参数 ----
-Help() {
-    cat <<EOF
-hy2-dnat-watchdog-install.sh - 一键部署 HY2 DNAT Watchdog
-
-用法:
-  bash hy2-dnat-watchdog-install.sh [OPTIONS]
-
-选项:
-  --offset K    自定义偏移量 K（默认 10000）
-                语义：HY2 监听端口 N → 转发 UDP N..N+K 到 N
-                K 必须是 1..65534 之间的整数
-                上限超过 65535 时自动截断为 65535
-  --help, -h    显示此帮助
-
-示例:
-  # 默认部署（offset=10000）
-  bash hy2-dnat-watchdog-install.sh
-
-  # 首次部署时指定 offset=20000
-  bash hy2-dnat-watchdog-install.sh --offset 20000
-
-部署后修改 offset（无需重装）:
-  /usr/local/bin/hy2-dnat-watchdog.sh --offset 20000
-  /usr/local/bin/hy2-dnat-watchdog.sh --show
-EOF
-    exit 0
-}
-
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --offset)
-            shift
-            if [ -z "$1" ]; then
-                echo "[ERROR] --offset 需要一个参数" >&2; exit 2
-            fi
-            OFFSET_ARG="$1"
-            shift
-            ;;
-        --help|-h)
-            Help
-            ;;
-        *)
-            echo "[ERROR] 未知参数: $1 （用 --help 查看用法）" >&2; exit 2
-            ;;
-    esac
-done
-
-# 校验 --offset 参数
-if [ -n "$OFFSET_ARG" ]; then
-    if ! [[ "$OFFSET_ARG" =~ ^[0-9]+$ ]]; then
-        echo "[ERROR] --offset 必须是正整数，收到: $OFFSET_ARG" >&2; exit 2
-    fi
-    if [ "$OFFSET_ARG" -lt 1 ] || [ "$OFFSET_ARG" -gt 65534 ]; then
-        echo "[ERROR] --offset 取值范围 1..65534，收到: $OFFSET_ARG" >&2; exit 2
-    fi
-    OFFSET="$OFFSET_ARG"
-fi
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-
-# ---- 前置检查 ----
-[ "$(id -u)" -ne 0 ] && error "请使用 root 用户运行"
-
-! command -v systemctl >/dev/null 2>&1 && error "需要 systemd 支持"
-
-! systemctl is-active --quiet xboard-node 2>/dev/null && warn "xboard-node 服务未运行，部署后需先启动 xboard-node"
-
-# ---- 自动检测网卡名 ----
-detect_iface() {
-    if [ -n "$IFACE" ] && [ "$IFACE" != "auto" ]; then
-        return
-    fi
-    # 方法1：从默认路由获取
-    IFACE=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+' | head -1)
-    # 方法2：从默认路由表获取
-    if [ -z "$IFACE" ]; then
-        IFACE=$(ip route show default 2>/dev/null | grep -oP 'dev \K\S+' | head -1)
-    fi
-    # 方法3：取第一个非 lo/docker 网卡
-    if [ -z "$IFACE" ]; then
-        IFACE=$(ip -o link show 2>/dev/null | grep -v 'lo\|docker\|br-\|veth' | awk '{print $2}' | sed 's/://' | head -1)
-    fi
-    if [ -z "$IFACE" ]; then
-        error "无法自动检测网卡名，请在脚本顶部手动设置 IFACE"
-    fi
-}
-
-detect_iface
-
-# ---- 检测是否安装了宝塔/aapanel/1Panel/CasaOS 面板 ----
-# 装了面板的环境通常已经在用 iptables（面板自带防火墙管理），不能卸载 iptables
-# watchdog 改用 iptables 规则，与面板保持一致，避免双后端冲突
-detect_panel() {
-    PANEL_DETECTED=""
-    PANEL_NAME=""
-
-    # 宝塔面板（中文版）/ aapanel（国际版）：共用 /www/server/panel 目录
-    if [ -d /www/server/panel ] || command -v bt >/dev/null 2>&1; then
-        PANEL_DETECTED="yes"
-        PANEL_NAME="宝塔/aapanel"
-    # 1Panel：/opt/1panel 目录
-    elif [ -d /opt/1panel ] || command -v 1pctl >/dev/null 2>&1; then
-        PANEL_DETECTED="yes"
-        PANEL_NAME="1Panel"
-    # CasaOS：/etc/casaos 或 casaos 命令
-    elif [ -d /etc/casaos ] || command -v casaos-controller >/dev/null 2>&1; then
-        PANEL_DETECTED="yes"
-        PANEL_NAME="CasaOS"
-    fi
-
-    if [ -n "$PANEL_DETECTED" ]; then
-        info "检测到 $PANEL_NAME 面板，保留 iptables 并使用 iptables 后端（避免与面板防火墙冲突）"
-        return 0
-    else
-        return 1
-    fi
-}
-
-# ---- 卸载 iptables（仅当无面板时）----
-uninstall_iptables_if_needed() {
-    if detect_panel; then
-        info "跳过 iptables 卸载（检测到面板，保持 iptables）"
-        return 0
-    fi
-
-    if ! command -v iptables >/dev/null 2>&1; then
-        return 0
-    fi
-    warn "未检测到面板，卸载 iptables 并切换为 nftables..."
-    # 先清空 iptables 里的 NAT 规则，避免残留影响
-    iptables -t nat -F PREROUTING 2>/dev/null || true
-    iptables -t nat -F 2>/dev/null || true
-    ip6tables -t nat -F PREROUTING 2>/dev/null || true
-    ip6tables -t nat -F 2>/dev/null || true
-    # 根据包管理器卸载
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get purge -y iptables >/dev/null 2>&1 || true
-    elif command -v yum >/dev/null 2>&1; then
-        yum remove -y iptables iptables-ipv6 >/dev/null 2>&1 || true
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf remove -y iptables iptables-nft >/dev/null 2>&1 || true
-    elif command -v apk >/dev/null 2>&1; then
-        apk del iptables ip6tables >/dev/null 2>&1 || true
-    elif command -v pacman >/dev/null 2>&1; then
-        pacman -R --noconfirm iptables >/dev/null 2>&1 || true
-    fi
-    if command -v iptables >/dev/null 2>&1; then
-        warn "iptables 卸载失败，但不影响 nftables 使用"
-    else
-        info "iptables 已卸载"
-    fi
-}
-
-# ---- 安装 nftables（如果需要）----
-install_nftables_if_needed() {
-    if command -v nft >/dev/null 2>&1; then
-        return 0
-    fi
-    warn "未检测到 nft，正在安装..."
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y -qq nftables
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y nftables
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y nftables
-    elif command -v apk >/dev/null 2>&1; then
-        apk add nftables
-    elif command -v pacman >/dev/null 2>&1; then
-        pacman -S --noconfirm nftables
-    else
-        error "无法自动安装 nftables，请手动安装后重试"
-    fi
-    command -v nft >/dev/null 2>&1 || error "nftables 安装失败"
-    info "nftables 安装成功"
-}
-
-# ---- 确保 iptables 可用（面板环境下）----
-ensure_iptables_if_needed() {
-    if command -v iptables >/dev/null 2>&1 && command -v ip6tables >/dev/null 2>&1; then
-        return 0
-    fi
-    warn "检测到面板但 iptables/ip6tables 不全，正在安装..."
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y -qq iptables
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y iptables iptables-ipv6
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y iptables iptables-nft
-    elif command -v apk >/dev/null 2>&1; then
-        apk add iptables ip6tables
-    elif command -v pacman >/dev/null 2>&1; then
-        pacman -S --noconfirm iptables
-    else
-        error "无法自动安装 iptables，请手动安装后重试"
-    fi
-    command -v iptables >/dev/null 2>&1 || error "iptables 安装失败"
-    info "iptables 安装成功"
-}
-
-# ---- 决策后端 ----
-if detect_panel; then
-    BACKEND="iptables"
-    ensure_iptables_if_needed
-else
-    BACKEND="nftables"
-    uninstall_iptables_if_needed
-    install_nftables_if_needed
-fi
-
-# 确保加载内核模块
-modprobe nf_nat >/dev/null 2>&1 || true
-modprobe nf_conntrack >/dev/null 2>&1 || true
-if [ "$BACKEND" = "nftables" ]; then
-    modprobe nft_nat >/dev/null 2>&1 || true
-    modprobe nft_chain_nat >/dev/null 2>&1 || true
-    modprobe nft_redir >/dev/null 2>&1 || true
-else
-    modprobe iptable_nat >/dev/null 2>&1 || true
-    modprobe ip6table_nat >/dev/null 2>&1 || true
-    modprobe xt_REDIRECT >/dev/null 2>&1 || true
-    modprobe xt_comment >/dev/null 2>&1 || true
-fi
-
-info "防火墙后端: $BACKEND"
-info "对外网卡:   $IFACE"
-
-# ---- 确认配置 ----
-echo ""
-echo "========== HY2 DNAT Watchdog 部署 =========="
-echo ""
-echo "  防火墙后端: $BACKEND"
-echo "  对外网卡:   $IFACE"
-echo "  端口范围:   HY2 端口 N → 转发 N ~ N+$OFFSET 到 N"
-echo "  端口上限:   不超过 65535（自动截断）"
-echo "  检测间隔:   每 1 分钟（cron）"
-echo ""
-read -p "确认部署？[y/N] " CONFIRM
-[ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ] && { echo "已取消"; exit 0; }
-
-# ---- 写入配置文件 ----
-info "写入配置文件 /etc/hy2-dnat-watchdog.conf"
-cat > /etc/hy2-dnat-watchdog.conf << EOF
-# HY2 DNAT Watchdog 配置
-# 后端：iptables 或 nftables（检测到面板时为 iptables，否则为 nftables）
-BACKEND=$BACKEND
-IFACE=$IFACE
-# 偏移量：HY2 端口 N → 转发 N..N+OFFSET 到 N（上限 65535 自动截断）
-# 运行时可用 'hy2-dnat-watchdog.sh --offset K' 修改此值并立即生效
-OFFSET=$OFFSET
-EOF
-
-# ---- 部署 watchdog 脚本 ----
-info "部署脚本 /usr/local/bin/hy2-dnat-watchdog.sh"
-cat > /usr/local/bin/hy2-dnat-watchdog.sh << 'WATCHDOG_SCRIPT'
-#!/bin/bash
-# hy2-dnat-watchdog.sh
-# 自动监控 xboard-node 的 HY2 端口变化，生成对应的 DNAT 规则
-# 规则：HY2 监听端口 N -> 转发 UDP N ~ N+OFFSET 到 N
-# 端口上限 65535，自动截断
-#
-# 用法：
-#   hy2-dnat-watchdog.sh                默认 cron 模式，检测端口并按需更新规则
-#   hy2-dnat-watchdog.sh --offset K     修改 offset 为 K 并立即重生成规则
-#   hy2-dnat-watchdog.sh --show         查看当前 offset、HY2 端口与活动规则
-#   hy2-dnat-watchdog.sh --help         显示帮助
-
-# cron 环境下 PATH 非常精简，确保包含所有必要路径
-export PATH="/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin:/usr/local/sbin"
-
-LOCKFILE="/tmp/hy2-dnat-watchdog.lock"
-LOGFILE="/var/log/hy2-dnat-watchdog.log"
-STATE_FILE="/var/run/hy2-dnat-watchdog.state"
-CONF_FILE="/etc/hy2-dnat-watchdog.conf"
-
-log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOGFILE"
-    # 只保留最后 20 条记录
-    tail -20 "$LOGFILE" > "${LOGFILE}.tmp" && mv "${LOGFILE}.tmp" "$LOGFILE"
-}
-
-# ---- 解析命令行参数（在加锁之前处理无需锁的子命令） ----
-CLI_MODE="cron"
-NEW_OFFSET=""
-
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --offset)
-            shift
-            if [ -z "$1" ]; then
-                echo "[ERROR] --offset 需要一个参数" >&2; exit 2
-            fi
-            NEW_OFFSET="$1"
-            CLI_MODE="set-offset"
-            shift
-            ;;
-        --show)
-            CLI_MODE="show"
-            shift
-            ;;
-        --help|-h)
-            cat <<EOF
-Usage: hy2-dnat-watchdog.sh [OPTIONS]
-
-Without options, runs in cron mode: detects HY2 port from journalctl/ss,
-updates DNAT rules if the port changed or the rules drifted.
-
-Options:
-  --offset K    Set port-range offset to K (HY2 port N -> forward N..N+K to N),
-                write back to $CONF_FILE, force-regenerate DNAT rules now.
-                K must be an integer in 1..65534. Upper bound auto-truncated
-                to 65535.
-  --show        Print current offset, last-known HY2 port, DNAT range and
-                the active rules, then exit. Does not modify anything.
-  --help, -h    Show this help.
-
-Files:
-  Config: $CONF_FILE
-  State:  $STATE_FILE
-  Log:    $LOGFILE
-EOF
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $1 (try --help)" >&2; exit 2
-            ;;
-    esac
-done
-
-# ---- 读取配置 ----
-IFACE=""
-OFFSET=10000
-BACKEND=""    # 空值默认 nftables；由 install 脚本写入 iptables 或 nftables
-if [ -f "$CONF_FILE" ]; then
-    source "$CONF_FILE" 2>/dev/null
-    # 向后兼容：旧 conf 文件可能写的是 PORT_RANGE 而非 OFFSET
-    if [ -n "${PORT_RANGE:-}" ] && [ -z "${OFFSET:-}" ]; then
-        OFFSET="$PORT_RANGE"
-    fi
-fi
-# 兼容旧配置（没有 BACKEND 字段时默认 nftables）
-if [ -z "$BACKEND" ]; then
-    BACKEND="nftables"
-fi
-
-# ---- --offset K 模式：写回 conf，清 state 强制重生成，然后落入 cron 流程 ----
-if [ "$CLI_MODE" = "set-offset" ]; then
-    if ! [[ "$NEW_OFFSET" =~ ^[0-9]+$ ]]; then
-        echo "[ERROR] --offset 必须是正整数，收到: $NEW_OFFSET" >&2; exit 2
-    fi
-    if [ "$NEW_OFFSET" -lt 1 ] || [ "$NEW_OFFSET" -gt 65534 ]; then
-        echo "[ERROR] --offset 取值范围 1..65534，收到: $NEW_OFFSET" >&2; exit 2
-    fi
-    if [ ! -f "$CONF_FILE" ]; then
-        echo "[ERROR] 配置文件 $CONF_FILE 不存在，请先跑 install 脚本" >&2; exit 1
-    fi
-    # 备份 conf
-    cp -a "$CONF_FILE" "${CONF_FILE}.bak.$(date +%s)"
-    # 替换或追加 OFFSET
-    if grep -qE '^OFFSET=' "$CONF_FILE"; then
-        sed -i "s|^OFFSET=.*|OFFSET=$NEW_OFFSET|" "$CONF_FILE"
-    else
-        echo "OFFSET=$NEW_OFFSET" >> "$CONF_FILE"
-    fi
-    # 清理旧 conf 里可能残留的 PORT_RANGE 字段（避免向后兼容路径在下次读错）
-    sed -i '/^PORT_RANGE=/d' "$CONF_FILE"
-    # 强制下次检测重建规则
-    rm -f "$STATE_FILE"
-    OFFSET="$NEW_OFFSET"
-    echo "[ok] OFFSET 已更新为 $NEW_OFFSET，正在重新生成 DNAT 规则..."
-    log "CLI: --offset $NEW_OFFSET 已写入 conf，开始重生成规则"
-    # 落入正常流程继续执行
-    CLI_MODE="cron"
-fi
-
-# ---- --show 模式：只读，不打 lock，不修改任何东西 ----
-if [ "$CLI_MODE" = "show" ]; then
-    echo "===== hy2-dnat-watchdog status ====="
-    echo "config:    $CONF_FILE"
-    echo "OFFSET:    $OFFSET"
-    echo "BACKEND:   $BACKEND"
-    echo "IFACE:     $IFACE"
-    if [ -f "$STATE_FILE" ]; then
-        LAST_PORT=$(cat "$STATE_FILE" 2>/dev/null)
-        END=$((LAST_PORT + OFFSET))
-        [ "$END" -gt 65535 ] && END=65535
-        echo "last HY2 port: $LAST_PORT"
-        echo "DNAT range:    $LAST_PORT-$END -> $LAST_PORT"
-    else
-        echo "last HY2 port: (none yet)"
-    fi
-    echo
-    echo "--- active rules (BACKEND=$BACKEND) ---"
-    if [ "$BACKEND" = "iptables" ]; then
-        if command -v iptables >/dev/null 2>&1; then
-            iptables -t nat -S PREROUTING 2>/dev/null | grep "hy2-dnat-watchdog" || echo "(no iptables rules)"
-        fi
-        if command -v ip6tables >/dev/null 2>&1; then
-            ip6tables -t nat -S PREROUTING 2>/dev/null | grep "hy2-dnat-watchdog" || echo "(no ip6tables rules)"
-        fi
-    else
-        nft list table inet hysteria_porthopping 2>/dev/null || echo "(no nft table)"
-    fi
-    echo
-    echo "--- last 10 log lines ---"
-    tail -10 "$LOGFILE" 2>/dev/null || echo "(no log yet)"
-    exit 0
-fi
-
-# 防止并发执行（cron 与 --offset 重生成都需要 lock）
-if [ -f "$LOCKFILE" ]; then
-    LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$LOCKFILE" 2>/dev/null || echo 0) ))
-    if [ "$LOCK_AGE" -lt 60 ]; then
-        exit 0
-    fi
-    rm -f "$LOCKFILE"
-fi
-touch "$LOCKFILE"
-trap "rm -f $LOCKFILE" EXIT
-
-# ---- 自动检测网卡名（如果未配置或为 auto）----
-if [ -z "$IFACE" ] || [ "$IFACE" = "auto" ]; then
-    IFACE=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+' | head -1)
-    if [ -z "$IFACE" ]; then
-        IFACE=$(ip route show default 2>/dev/null | grep -oP 'dev \K\S+' | head -1)
-    fi
-    if [ -z "$IFACE" ]; then
-        IFACE=$(ip -o link show 2>/dev/null | grep -v 'lo\|docker\|br-\|veth' | awk '{print $2}' | sed 's/://' | head -1)
-    fi
-fi
-if [ -z "$IFACE" ]; then
-    log "ERROR: 无法检测网卡名"
-    exit 1
-fi
-
-# ---- 获取 HY2 监听端口 ----
-# 方法1：从 journalctl 日志匹配 [hysteria2:PORT]
-HY2_PORT=$(journalctl -u xboard-node --no-pager -n 1000 2>/dev/null \
-    | grep -oP '\[hysteria2:\K\d+' \
-    | tail -1)
-
-# 方法2：兜底，取 xboard-node 进程中所有 UDP 端口里最大的
-if [ -z "$HY2_PORT" ]; then
-    HY2_PORT=$(ss -ulnp | grep xboard-node \
-        | awk '{print $4}' \
-        | grep -oP ':\K\d+' \
-        | sort -n \
-        | tail -1)
-fi
-
-if [ -z "$HY2_PORT" ]; then
-    log "ERROR: 未检测到 HY2 端口（xboard-node 可能未运行或未启用 HY2 协议）"
-    exit 1
-fi
-
-# 验证端口确实在监听（日志可能过时）
-if ! ss -ulnp | grep -q ":${HY2_PORT}\b"; then
-    log "日志端口 $HY2_PORT 未在监听，回退到实际 UDP 端口"
-    HY2_PORT=$(ss -ulnp | grep xboard-node \
-        | awk '{print $4}' \
-        | grep -oP ':\K\d+' \
-        | sort -n \
-        | tail -1)
-    if [ -z "$HY2_PORT" ]; then
-        log "ERROR: 没有可用的 UDP 监听端口（HY2 内核可能未启动）"
-        exit 1
-    fi
-fi
-
-PORT_END=$((HY2_PORT + OFFSET))
-
-# 端口号不能超过 65535
-if [ "$PORT_END" -gt 65535 ]; then
-    log "PORT_END $PORT_END 超过上限，截断为 65535"
-    PORT_END=65535
-fi
-
-log "HY2 端口: $HY2_PORT, DNAT 范围: $HY2_PORT-$PORT_END -> $HY2_PORT, 网卡: $IFACE"
-
-# watchdog 规则的唯一 comment 标记，所有规则都用这个标记，清理时只删自己的
-WATCHDOG_MARK="hy2-dnat-watchdog"
-
-# ---- 清理旧版本残留 ----
-# 只清理 watchdog 自己写的规则，绝不触碰宝塔/aapanel/WAF/docker 等其他工具的 NAT 规则
-# 策略：所有 watchdog 生成的规则都带 "hy2-dnat-watchdog" comment 标记，只删除带这个标记的规则
-cleanup_legacy_rules() {
-
-    # ---- nftables 侧：扫描 ip/ip6 nat 表的 prerouting/PREROUTING 链 ----
-    # 同时处理小写 prerouting（nft 原生命令）和大写 PREROUTING（iptables-nft 后端）
-    for fam in ip ip6; do
-        for chain_name in prerouting PREROUTING; do
-            nft list chain $fam nat $chain_name 2>/dev/null | grep -q . || continue
-
-            # 1) 删除带 watchdog comment 的规则
-            nft -a list chain $fam nat $chain_name 2>/dev/null \
-                | grep "$WATCHDOG_MARK" \
-                | grep -oP 'handle \K\d+' \
-                | while read h; do
-                    nft delete rule $fam nat $chain_name handle "$h" 2>/dev/null \
-                        && log "清理 $fam nat $chain_name 中 watchdog 标记规则 (handle $h)"
-                done
-
-            # 2) 检测无 comment 标记的 redirect 规则（可能是宝塔/WAF 的转发规则）
-            legacy_count=$(nft -a list chain $fam nat $chain_name 2>/dev/null \
-                | grep "redirect to" \
-                | grep -v "$WATCHDOG_MARK" \
-                | grep -c . || true)
-            if [ "$legacy_count" -gt 0 ]; then
-                log "WARN: $fam nat $chain_name 检测到 ${legacy_count} 条无标记 redirect 规则（可能是宝塔/WAF 转发），未自动删除"
-            fi
-        done
-    done
-
-    # ---- iptables 侧：清理带 watchdog comment 标记的 PREROUTING 规则 ----
-    # iptables 不允许直接按 comment 删除，需要先 -S 列出规则文本再 -D 删除
-    if command -v iptables >/dev/null 2>&1; then
-        iptables -t nat -S PREROUTING 2>/dev/null | grep "$WATCHDOG_MARK" | while read rule; do
-            # 把 -A 转成 -D 用于删除
-            del_rule=$(echo "$rule" | sed 's/^-A /-D /')
-            iptables -t nat $del_rule 2>/dev/null && log "清理 iptables nat PREROUTING 中 watchdog 标记规则"
-        done
-    fi
-    if command -v ip6tables >/dev/null 2>&1; then
-        ip6tables -t nat -S PREROUTING 2>/dev/null | grep "$WATCHDOG_MARK" | while read rule; do
-            del_rule=$(echo "$rule" | sed 's/^-A /-D /')
-            ip6tables -t nat $del_rule 2>/dev/null && log "清理 ip6tables nat PREROUTING 中 watchdog 标记规则"
-        done
-    fi
-
-    # 注意：不删除 ip/ip6 nat 表本身，可能被宝塔/docker/k8s/WAF 等工具使用
-}
-
-# ---- 检查是否需要更新 ----
-# 注：cleanup_legacy_rules 已移到下方，只在 NEED_UPDATE=true 时执行
-# 避免每分钟 cron 触发时都清理一遍自己的规则再重建（造成瞬态 UDP 中断）
-NEED_UPDATE=false
-LAST_PORT=""
-if [ -f "$STATE_FILE" ]; then
-    LAST_PORT=$(cat "$STATE_FILE" 2>/dev/null)
-fi
-
-if [ "$LAST_PORT" != "$HY2_PORT" ]; then
-    NEED_UPDATE=true
-    log "端口变化: ${LAST_PORT:-无} -> $HY2_PORT"
-else
-    # 端口号相同，验证实际规则是否一致
-    if [ "$BACKEND" = "iptables" ]; then
-        CURRENT_REDIR=$(iptables -t nat -S PREROUTING 2>/dev/null \
-            | grep "$WATCHDOG_MARK" \
-            | grep -oP 'to-ports \K\d+' \
-            | head -1 || true)
-    else
-        CURRENT_REDIR=$(nft list table inet hysteria_porthopping 2>/dev/null \
-            | grep "$WATCHDOG_MARK" \
-            | grep -oP 'redirect to :\K\d+' \
-            | head -1 || true)
-    fi
-
-    if [ "$CURRENT_REDIR" != "$HY2_PORT" ]; then
-        NEED_UPDATE=true
-        log "规则不匹配: 实际 redir=$CURRENT_REDIR, 期望=$HY2_PORT, 需要修复"
-    fi
-fi
-
-if [ "$NEED_UPDATE" = false ]; then
-    exit 0
-fi
-
-log "开始更新 DNAT 规则 (后端: $BACKEND)"
-
-# 只在端口变化/规则不匹配时清理旧规则（幂等：带 comment 标记的精确删除）
-cleanup_legacy_rules
-
-# 确保加载内核模块
-modprobe nf_nat >/dev/null 2>&1 || true
-modprobe nf_conntrack >/dev/null 2>&1 || true
-if [ "$BACKEND" = "nftables" ]; then
-    modprobe nft_nat >/dev/null 2>&1 || true
-    modprobe nft_chain_nat >/dev/null 2>&1 || true
-    modprobe nft_redir >/dev/null 2>&1 || true
-else
-    modprobe iptable_nat >/dev/null 2>&1 || true
-    modprobe ip6table_nat >/dev/null 2>&1 || true
-    modprobe xt_REDIRECT >/dev/null 2>&1 || true
-    modprobe xt_comment >/dev/null 2>&1 || true
-fi
-
-# ---- nftables 后端：使用专用 inet 表，define + nft -f 加载 ----
-update_nftables() {
-    # 删除旧表（幂等）
-    nft delete table inet hysteria_porthopping 2>/dev/null || true
-
-    # 生成声明式规则文件（define 常量 + nft -f 整体加载）
-    NFT_FILE=$(mktemp /tmp/hy2-dnat-XXXXXX.nft)
-    cat > "$NFT_FILE" <<EOF
-define INGRESS_INTERFACE="$IFACE"
-define DNAT_RANGE=$HY2_PORT-$PORT_END
-define HYSTERIA_SERVER_PORT=$HY2_PORT
-
-table inet hysteria_porthopping {
-  chain prerouting {
-    type nat hook prerouting priority dstnat; policy accept;
-    iifname \$INGRESS_INTERFACE udp dport \$DNAT_RANGE counter redirect to :\$HYSTERIA_SERVER_PORT comment "$WATCHDOG_MARK"
-  }
-}
-EOF
-
-    if nft -f "$NFT_FILE" 2>/dev/null; then
-        log "nftables inet: UDP $HY2_PORT-$PORT_END -> $HY2_PORT (define 规则文件加载)"
-        rm -f "$NFT_FILE"
-    else
-        rm -f "$NFT_FILE"
-        log "ERROR: nft -f 规则文件加载失败"
-        exit 1
-    fi
-}
-
-# ---- iptables 后端：使用 iptables + ip6tables 原生规则，带 comment 标记 ----
-# 与宝塔/aapanel 等面板共存：不动表本身，只在 PREROUTING 链添加带 comment 标记的规则
-update_iptables() {
-    local cmd=$1
-    # 确保 nat 模块已加载
-    modprobe iptable_nat >/dev/null 2>&1 || true
-    # iptables 端口范围用 start:end 语法
-    $cmd -t nat -A PREROUTING -i "$IFACE" -p udp --dport "$HY2_PORT:$PORT_END" \
-        -j REDIRECT --to-ports "$HY2_PORT" \
-        -m comment --comment "$WATCHDOG_MARK"
-    log "iptables: UDP $HY2_PORT:$PORT_END -> $HY2_PORT ($cmd)"
-}
-
-# ---- 执行更新 ----
-if [ "$BACKEND" = "iptables" ]; then
-    update_iptables "iptables"
-    update_iptables "ip6tables"
-else
-    update_nftables
-fi
-
-# ---- 验证规则是否生效 ----
-VERIFY_OK=false
-if [ "$BACKEND" = "iptables" ]; then
-    # 检查 iptables 规则是否存在且端口正确
-    # 修复 bug: pattern 不能以 -- 开头否则会被 grep 当成长选项
-    # 之前写法 grep -q "--to-ports $HY2_PORT" 在所有 iptables 上都匹配失败
-    # 改用 -- 分隔符明确告知 grep 后面是 pattern 不是选项
-    if iptables -t nat -S PREROUTING 2>/dev/null | grep "$WATCHDOG_MARK" | grep -q -- "--to-ports $HY2_PORT"; then
-        VERIFY_OK=true
-    fi
-else
-    if nft list table inet hysteria_porthopping 2>/dev/null | grep -q "redirect to :${HY2_PORT}"; then
-        VERIFY_OK=true
-    fi
-fi
-
-if [ "$VERIFY_OK" = true ]; then
-    echo "$HY2_PORT" > "$STATE_FILE"
-    log "DNAT 规则更新完成并验证通过"
-else
-    log "ERROR: DNAT 规则更新后验证失败，不写入 state"
-    exit 1
-fi
-WATCHDOG_SCRIPT
-
-chmod +x /usr/local/bin/hy2-dnat-watchdog.sh
-
-# ---- 首次运行 ----
-info "首次运行 watchdog..."
-rm -f /var/run/hy2-dnat-watchdog.state
-/usr/local/bin/hy2-dnat-watchdog.sh || warn "首次运行失败（xboard-node 可能未启动），服务启动后 cron 会自动修复"
-
-# ---- 验证结果 ----
-echo ""
-echo "========== 部署验证 =========="
-nft list table inet hysteria_porthopping 2>/dev/null || echo "  (无规则)"
-
-STATE=$(cat /var/run/hy2-dnat-watchdog.state 2>/dev/null || echo "空")
-echo ""
-echo "当前 HY2 端口: $STATE"
-
-# ---- 设置 cron ----
-CRON_LINE="* * * * * /usr/local/bin/hy2-dnat-watchdog.sh"
-
-# 检查 crontab 是否可用，不可用则安装 cron
-if ! command -v crontab >/dev/null 2>&1; then
-    warn "未检测到 crontab 命令，正在安装 cron..."
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y -qq cron
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y cronie
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y cronie
-    elif command -v apk >/dev/null 2>&1; then
-        apk add dcron
-    elif command -v pacman >/dev/null 2>&1; then
-        pacman -S --noconfirm cronie
-    else
-        error "无法自动安装 cron，请手动安装 cronie/cron 后重新运行"
-    fi
-fi
-
-# 写入 cron 任务（使用临时文件，避免管道失败静默丢任务）
-info "设置 cron 定时任务..."
-TMP_CRON=$(mktemp)
-crontab -l 2>/dev/null | grep -v 'hy2-dnat-watchdog' > "$TMP_CRON" || true
-echo "$CRON_LINE" >> "$TMP_CRON"
-if crontab "$TMP_CRON" 2>/dev/null; then
-    info "cron 任务写入成功"
-else
-    rm -f "$TMP_CRON"
-    error "cron 任务写入失败，请手动执行 crontab -e 添加: $CRON_LINE"
-fi
-rm -f "$TMP_CRON"
-
-# 确保 crond/cron 服务运行
-if command -v systemctl >/dev/null 2>&1; then
-    systemctl enable cron 2>/dev/null || systemctl enable crond 2>/dev/null || true
-    systemctl start cron 2>/dev/null || systemctl start crond 2>/dev/null || true
-elif command -v rc-update >/dev/null 2>&1; then
-    rc-update add dcron 2>/dev/null || true
-    rc-service dcron start 2>/dev/null || true
-fi
-
-# 验证 cron 是否写入成功
-if crontab -l 2>/dev/null | grep -q 'hy2-dnat-watchdog'; then
-    info "cron 验证通过"
-else
-    warn "cron 任务可能未正确写入，请手动执行: crontab -e 添加: $CRON_LINE"
-fi
-
-echo ""
-echo "========== 部署完成 =========="
-echo ""
-echo "脚本:  /usr/local/bin/hy2-dnat-watchdog.sh"
-echo "配置:  /etc/hy2-dnat-watchdog.conf"
-echo "日志:  /var/log/hy2-dnat-watchdog.log"
-echo "状态:  /var/run/hy2-dnat-watchdog.state"
-echo "Cron:  每分钟自动执行"
-echo ""
-echo "常用命令:"
-echo "  手动运行:  /usr/local/bin/hy2-dnat-watchdog.sh"
-echo "  查看日志:  tail -f /var/log/hy2-dnat-watchdog.log"
-echo "  查看规则:  nft list table inet hysteria_porthopping"
-echo "  查看状态:  cat /var/run/hy2-dnat-watchdog.state"
-echo "  卸载:      bash hy2-dnat-watchdog-uninstall.sh"
-EMBEDDED_WD_INSTALLER
-    echo "y" | bash /tmp/.xboard-hy2-wd-installer.$$ --offset "$WATCHDOG_OFFSET" 2>&1 | tail -25 || true
-    rm -f /tmp/.xboard-hy2-wd-installer.$$
-    log "HY2 DNAT Watchdog: /usr/local/bin/hy2-dnat-watchdog.sh (lazy: acts only when HY2 port detected)"
-else
-    log "HY2 DNAT Watchdog skipped (--no-hy2-watchdog)"
 fi
 
 # ==================== Done ====================
