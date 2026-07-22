@@ -42,13 +42,37 @@ sudo bash install.sh
 
 脚本会逐项询问面板地址、token、machine id。
 
-## 升级现有部署
+## 升级补丁版（--upgrade）
 
-已存在 `/etc/xboard-node/config.yml` 时，脚本自动进入「升级模式」（仅替换二进制，保留配置）：
+当有新版补丁二进制发布时，使用 `--upgrade` 一步完成升级：
+
+```bash
+sudo bash install.sh --upgrade
+```
+
+流程：
+
+1. 从官方 `cedar2025/xboard-node` 仓库下载最新原始二进制，替换当前补丁版（确保干净的官方基线）
+2. 从 `xboard-node-key` 仓库下载最新补丁版二进制，替换官方版
+3. 重启服务（config / credentials 保持不变）
+
+> 如果官方仓库不可达，会自动 fallback 到本地 `.bak.*` 备份文件。
+
+### 重新安装（保留配置）
+
+已存在 `/etc/xboard-node/config.yml` 时，直接重新运行安装命令也会自动进入升级模式（仅替换二进制，保留配置）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-node-key/main/install.sh \
   | sudo bash -s -- --mode machine --panel 'https://...' --token '...' --machine-id 1
+```
+
+## 回滚
+
+```bash
+sudo systemctl stop xboard-node
+sudo cp /usr/local/bin/xboard-node.bak.列出的时间戳 /usr/local/bin/xboard-node
+sudo systemctl start xboard-node
 ```
 
 ## 完整参数
@@ -63,6 +87,7 @@ curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-node-key/m
 | `--health-port` | 65530 | 健康检查端口 |
 | `--kernel` | singbox | singbox / xray |
 | `--log-level` | info | info / warn / error / debug |
+| `--upgrade` | - | 升级模式：从官方仓库恢复原始二进制，再安装最新补丁版 |
 | `--force` | - | 强制覆盖已存在的 config.yml |
 | `--skip-download` | - | 不下载二进制，复用现有 |
 | `--offset K` | 10000 | HY2 DNAT watchdog 端口范围偏移量（HY2 端口 N → 转发 N..N+K） |
@@ -98,14 +123,6 @@ foreach ($rows as $r) {
 
 每个已配置证书的节点应有 `fp_len=44`、`pem_len=570-900`。
 
-## 回滚
-
-```bash
-sudo systemctl stop xboard-node
-sudo cp /usr/local/bin/xboard-node.bak.列出的时间戳 /usr/local/bin/xboard-node
-sudo systemctl start xboard-node
-```
-
 ## 面板侧前置条件
 
 部署 node 侧之前，面板必须已：
@@ -134,7 +151,6 @@ echo admin_setting("server_ws_url");
 - 协议：HY2 / VLESS / VMess / TUIC / anytls / WireGuard 等均支持证书指纹上报
 - xhttp 传输：仅 xray 内核支持，若节点用 xhttp，请 `--kernel xray`
 - 架构：仅 amd64（x86_64），其他架构暂未编译
-
 
 ---
 
