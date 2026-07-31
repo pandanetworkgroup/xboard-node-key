@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# xboard-node one-line installer (with cert fingerprint reporting patch)
+# xboard-node one-line installer (cert-pin + port-label fix)
 # Repo: https://github.com/pandanetworkgroup/xboard-node-key
 #
 # One-line install (recommended):
@@ -21,7 +21,7 @@ BIN_PATH="/usr/local/bin/xboard-node"
 CLI_PATH="/usr/local/bin/xbctl"
 OFFICIAL_REPO="cedar2025/Xboard-Node"
 SERVICE_FILE="/etc/systemd/system/xboard-node.service"
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.2.0"
 
 DEF_HEALTH_PORT=65530
 DEF_KERNEL="singbox"
