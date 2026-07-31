@@ -21,6 +21,7 @@ xboard-node **带证书指纹上报补丁版**的一键安装脚本。在官方 
 - **Certificate fingerprint reporting**: `buildMetrics` now includes `cert_fingerprint` (SPKI SHA-256 Base64) and `cert_pem` fields for client-side certificate pinning support.
 - `cert.Manager.SPKIFingerprint()`: New method for computing SPKI SHA-256 fingerprint from the loaded certificate.
 - `cert.Manager.CertPEMString()`: New method for retrieving the certificate PEM as a string.
+- **QUIC/Hysteria2 support**: Binary is now built with `-tags with_quic`, enabling Hysteria2 protocol support out of the box.
 
 ### Binary
 - `xboard-node-linux-amd64` (63.3 MB) — Built from official Xboard-Node dev branch with:
