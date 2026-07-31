@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# xboard-node one-line installer (cert-pin + port-label fix)
+# xboard-node one-line installer (cert-pin + port-label fix + QUIC/HY2)
 # Repo: https://github.com/pandanetworkgroup/xboard-node-key
 #
 # One-line install (recommended):
