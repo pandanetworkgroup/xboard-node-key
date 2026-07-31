@@ -88,6 +88,7 @@ sudo systemctl start xboard-node
 | `--kernel` | singbox | singbox / xray |
 | `--log-level` | info | info / warn / error / debug |
 | `--upgrade` | - | 升级模式：从官方仓库恢复原始二进制，再安装最新补丁版 |
+| `--xbctl-binary` | - | 使用本地 xbctl 二进制文件（不下载） |
 | `--force` | - | 强制覆盖已存在的 config.yml |
 | `--skip-download` | - | 不下载二进制，复用现有 |
 | `--offset K` | 10000 | HY2 DNAT watchdog 端口范围偏移量（HY2 端口 N → 转发 N..N+K） |
@@ -98,10 +99,33 @@ sudo systemctl start xboard-node
 > HY2 DNAT Watchdog 已随 node 集成部署（惰性，详情见文末）。用 `--no-hy2-watchdog` 可跳过。
 
 - 二进制：`/usr/local/bin/xboard-node`
+- CLI：`/usr/local/bin/xbctl`
 - 配置：`/etc/xboard-node/config.yml`（600 权限）
 - 凭证：`/etc/xboard-node/credentials.env`（600 权限）
 - 实例数据：`/etc/xboard-node/instances/<instance_id>/node-<id>/certs/`
 - systemd 服务：`xboard-node.service`
+
+### xbctl 常用命令
+
+安装完成后可使用 `xbctl` 管理 node 服务：
+
+```bash
+xbctl list                    # 列出所有实例
+xbctl status                  # 查看运行状态
+xbctl start                   # 启动服务
+xbctl stop                    # 停止服务
+xbctl restart                  # 重启服务
+xbctl logs                    # 查看日志
+xbctl health                  # 健康检查
+xbctl bind-node ...           # 绑定新节点
+xbctl bind-machine ...        # 绑定新机器
+xbctl unbind-node ...         # 解绑节点
+xbctl unbind-machine ...      # 解绑机器
+xbctl upgrade                 # 升级二进制
+xbctl version                 # 查看版本
+```
+
+> 安装脚本会自动从官方 `cedar2025/Xboard-Node` 仓库下载 `xbctl-linux-amd64`。如已有本地二进制，可用 `--xbctl-binary /path/to/xbctl` 指定。已安装的 xbctl 不会重复下载（幂等）。
 
 验证上报：
 
