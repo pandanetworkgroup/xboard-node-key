@@ -11,6 +11,22 @@ xboard-node **带证书指纹上报补丁版**的一键安装脚本。在官方 
 
 ---
 
+
+## v1.1.0-cert-pinning (2026-07-31)
+
+### Bug Fix
+- **Port label not updating on hot-reload**: Fixed logger tag `[protocol:port]` not refreshing when panel changes node port/protocol via WebSocket push. Previously the tag was stuck on the initial port value after first start.
+
+### Features
+- **Certificate fingerprint reporting**: `buildMetrics` now includes `cert_fingerprint` (SPKI SHA-256 Base64) and `cert_pem` fields for client-side certificate pinning support.
+- `cert.Manager.SPKIFingerprint()`: New method for computing SPKI SHA-256 fingerprint from the loaded certificate.
+- `cert.Manager.CertPEMString()`: New method for retrieving the certificate PEM as a string.
+
+### Binary
+- `xboard-node-linux-amd64` (63.3 MB) — Built from official Xboard-Node dev branch with:
+  - `internal/cert/cert.go`: Added `SPKIFingerprint()` and `CertPEMString()` methods
+  - `internal/service/service.go`: Fixed 3x `if s.nodeLog == nil` guards → always refresh on config change; Added cert metrics in `buildMetrics()`
+
 ## 一行命令安装（推荐）
 
 > 把下面 `--panel` / `--token` / `--machine-id` 三个值换成你自己面板的对应值。
